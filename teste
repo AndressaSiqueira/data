@@ -1,0 +1,77 @@
+#!/usr/bin/env pwsh
+param ( 
+    [parameter(Mandatory = $true)]
+    [string]$Project,
+
+    [parameter(Mandatory = $true)]
+    [uri]$OrganizationUrl
+)
+
+$apiVersion = "7.1"
+$azdoResource = "499b84ac-1321-427f-aa17-267ca6975798" # Azure DevOps
+$OrganizationUrl = $OrganizationUrl.ToString().TrimEnd('/')
+
+Write-Host "🔐 Autenticando no Azure..."
+az login --allow-no-subscriptions --scope "$azdoResource/.default"
+
+# Obter todas as conexões
+Write-Host "📡 Buscando todas as service connections do projeto '$Project'..."
+$allConnections = az rest `
+    --resource $azdoResource `
+    --method GET `
+    --url "$OrganizationUrl/$Project/_apis/serviceendpoint/endpoints?includeDetails=true&api-version=$apiVersion" `
+    | ConvertFrom-Json
+
+# Filtrar apenas conexões 'azurerm' manuais com Service Principal
+$eligibleConnections = $allConnections.value | Where-Object {
+    $_.type -eq 'azurerm' -and
+    $_.authorization.scheme -eq 'ServicePrincipal' -and
+    $_.data.creationMode -eq 'Manual'
+}
+
+if (!$eligibleConnections -or $eligibleConnections.Count -eq 0) {
+    Write-Warning "🚫 Nenhuma conexão manual com Service Principal encontrada para converter."
+    exit 1
+}
+
+foreach ($sc in $eligibleConnections) {
+    $choices = @(
+        [System.Management.Automation.Host.ChoiceDescription]::new("&Converter", "Converter '$($sc.name)'...")
+        [System.Management.Automation.Host.ChoiceDescription]::new("&Pular", "Pular '$($sc.name)'...")
+        [System.Management.Automation.Host.ChoiceDescription]::new("&Sair", "Encerrar o script")
+    )
+    $prompt = "Deseja converter a conexão '$($sc.name)'?"
+    $decision = $Host.UI.PromptForChoice("", $prompt, $choices, 0)
+
+    if ($decision -eq 0) {
+        Write-Host "🔁 Convertendo '$($sc.name)'..."
+        
+        $sc.authorization.scheme = "WorkloadIdentityFederation"
+        $sc.data.PSObject.Properties.Remove('revertSchemeDeadline')
+
+        $body = $sc | ConvertTo-Json -Depth 4 -Compress
+        $putUrl = "$OrganizationUrl/$Project/_apis/serviceendpoint/endpoints/$($sc.id)?operation=ConvertAuthenticationScheme&api-version=$apiVersion"
+
+        $result = az rest `
+            --method PUT `
+            --url $putUrl `
+            --headers "Content-Type=application/json" `
+            --body $body `
+            --resource $azdoResource `
+            | ConvertFrom-Json
+
+        if ($result) {
+            Write-Host "✅ '$($sc.name)' convertida com sucesso!"
+        } else {
+            Write-Error "❌ Falha ao converter '$($sc.name)'"
+        }
+    }
+    elseif ($decision -eq 1) {
+        Write-Host "⏭️  Pulando '$($sc.name)'..."
+        continue
+    }
+    else {
+        Write-Host "🚪 Encerrando script."
+        break
+    }
+}
