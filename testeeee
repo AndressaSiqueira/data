@@ -387,7 +387,7 @@ function Get-AzureInstanceId {
         return $null
     }
 }
-
+ Write-Output "ID do Issuer: $instanceId"
 
 # Lista de ambientes para alternar
 $ambientes = @("dev", "qa", "prod")
