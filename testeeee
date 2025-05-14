@@ -328,7 +328,7 @@ function SetupServiceConnection {
         $env:AZURE_DEVOPS_EXT_AZURE_RM_SERVICE_PRINCIPAL_KEY = $Pass
 
         $subscription = Get-AzSubscription | Where-Object { $_.Id -eq $Environment.subscriptionId }
-
+# Cria a Service Connection
         $serviceEndpointId = az devops service-endpoint azurerm create `
             --azure-rm-service-principal-id $ServicePrincipal.clientId `
             --azure-rm-subscription-id $subscription.Id `
@@ -341,7 +341,7 @@ function SetupServiceConnection {
 
                 LogInfo -Message "Service connection '$serviceConnectionName' created."
 
-# Função para extrair o nome da organização
+# Função para extrair o nome da organização sem a URL Completa
 function Get-AzDevOpsOrganizationName {
     [cmdletbinding()]
     param(
@@ -358,6 +358,7 @@ function Get-AzDevOpsOrganizationName {
 $organizationName = Get-AzDevOpsOrganizationName -OrganizationURI $organizationURI
 Write-Host "Organization Name: $organizationName"
 
+# Comando para extrair o AppID do Service Principal
         $appId = az ad app list `
         --display-name "SP-Teste-DevTest" `
         --query "[0].appId" `
@@ -366,11 +367,27 @@ Write-Host "Organization Name: $organizationName"
         Write-Host "O Application ID é: $appId"
 
     
-# Pegar issuer
-$issuer = az ad app federated-credential list `
-  --id $appId `
-  --query "[0].issuer" `
-  -o tsv
+# Comando para pegar o issuer que vai ser usado para criar credencial federada #
+function Get-AzureInstanceId {
+    # URL da API sem autenticação via token
+    $url = "$OrganizationURI/_apis/connectiondata?api-version=6.0-preview"
+    
+    try {
+        # Chama a API e obtém a resposta
+        $response = Invoke-RestMethod -Uri $url -Method Get -ContentType "application/json"
+        
+        # Extrai o instanceId
+        $instanceId = $response.instanceId
+        Write-Output "Instance ID: $instanceId"
+        
+        # Retorna o instanceId
+        return $instanceId
+    } catch {
+        Write-Error "Erro ao obter o Instance ID: $_"
+        return $null
+    }
+}
+
 
 # Lista de ambientes para alternar
 $ambientes = @("dev", "qa", "prod")
@@ -388,12 +405,13 @@ $global:AmbienteIndex = ($global:AmbienteIndex + 1) % $ambientes.Length
 
 Write-Host "Usando o ambiente: $areas"
 
+# Comando para criar as credenciais federadas
      az ad app federated-credential create `
      --id $appId `
      --parameters @"
 {
     "name": "federated-devops.$areas",
-    "issuer": "$issuer",
+    "issuer": "https://vstoken.dev.azure.com/$instanceId",
     "subject": "sc://$organizationName/$project/$serviceConnectionName",
     "audiences": ["api://AzureADTokenExchange"]
 }
