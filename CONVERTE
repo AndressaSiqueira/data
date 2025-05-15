@@ -1,0 +1,110 @@
+function Convert-ServiceConnectionsToOIDC {
+    param (
+        [string]$OrganizationUrl,
+        [string]$Project
+    )
+
+    $apiVersion = "7.1"
+    $azdoResource = Get-AzDoResourceId
+    if (-not $azdoResource) {
+        throw "Não foi possível obter o ID do recurso do Azure DevOps dinamicamente."
+    }
+
+    $OrganizationUrl = $OrganizationUrl.TrimEnd('/')
+
+    Write-Host "🔐 Iniciando a conversão de Service Connections para OIDC..."
+
+    try {
+        # Obter todas as conexões
+        Write-Host "🔍 Obtendo todas as conexões de serviço..."
+        $allConnections = az rest `
+            --resource $azdoResource `
+            --method GET `
+            --url "$OrganizationUrl/$Project/_apis/serviceendpoint/endpoints?includeDetails=true&api-version=$apiVersion" `
+            | ConvertFrom-Json
+
+        if (!$allConnections) {
+            Write-Warning "🚫 Nenhuma conexão encontrada. Verifique se o URL e o projeto estão corretos."
+            return
+        }
+
+        # Log detalhado das conexões obtidas
+        Write-Host "🔍 Conexões obtidas: $($allConnections.value | ConvertTo-Json -Depth 2)"
+
+        # Filtrar conexões elegíveis
+        Write-Host "🔍 Filtrando conexões elegíveis para conversão..."
+        $eligibleConnections = $allConnections.value | Where-Object {
+            $_.type -eq 'azurerm' -and
+            $_.authorization.scheme -eq 'ServicePrincipal' -and
+            $_.data.creationMode -eq 'Manual' -and
+            $_.name -like 'spn-iac*'
+        }
+
+        if (!$eligibleConnections -or $eligibleConnections.Count -eq 0) {
+            Write-Warning "🚫 Nenhuma conexão manual com Service Principal encontrada para converter."
+            return
+        }
+
+        # Log detalhado das conexões elegíveis
+        Write-Host "🔍 Conexões elegíveis: $($eligibleConnections | ConvertTo-Json -Depth 2)"
+
+        foreach ($sc in $eligibleConnections) {
+            Write-Host "🔁 Convertendo a conexão '$($sc.name)' para Workload Identity Federation..."
+
+            $sc.authorization.scheme = "WorkloadIdentityFederation"
+
+            if ($sc.data.PSObject.Properties.Name -contains 'revertSchemeDeadline') {
+                $sc.data.PSObject.Properties.Remove('revertSchemeDeadline')
+            }
+
+            $body = $sc | ConvertTo-Json -Depth 10 -Compress
+            $putUrl = "$OrganizationUrl/$Project/_apis/serviceendpoint/endpoints/$($sc.id)?operation=ConvertAuthenticationScheme&api-version=$apiVersion"
+
+            try {
+                $result = az rest `
+                    --method PUT `
+                    --url $putUrl `
+                    --headers "Content-Type=application/json" `
+                    --body $body `
+                    --resource $azdoResource `
+                    | ConvertFrom-Json
+
+                if ($result) {
+                    Write-Host "✅ Conexão '$($sc.name)' convertida com sucesso!"
+                } else {
+                    Write-Error "❌ Falha ao converter a conexão '$($sc.name)'."
+                }
+            } catch {
+                Write-Error "❌ Erro ao converter a conexão '$($sc.name)': $_"
+            }
+        }
+    } catch {
+        Write-Error "❌ Ocorreu um erro durante a conversão: $_"
+    }
+
+    Write-Host "✅ Conversão de Service Connections para OIDC concluída."
+}
+
+function Get-AzDoResourceId {
+    Write-Host "🔍 Obtendo o ID do recurso do Azure DevOps dinamicamente..."
+    try {
+        $response = az rest `
+            --method GET `
+            --url "https://management.azure.com/providers/Microsoft.DevOps/operations?api-version=2019-07-01-preview" `
+            | ConvertFrom-Json
+
+        # Buscar o recurso com base em um critério genérico, como o tipo ou descrição
+        $resource = $response.value | Where-Object { $_.displayName -like "*Azure DevOps*" -or $_.name -like "*devops*" } | Select-Object -First 1
+
+        if ($resource) {
+            Write-Host "✅ Recurso encontrado: $($resource.displayName)"
+            return $resource.id
+        } else {
+            Write-Warning "🚫 Não foi possível encontrar um recurso correspondente."
+            return $null
+        }
+    } catch {
+        Write-Error "❌ Erro ao obter o ID do recurso: $_"
+        return $null
+    }
+}
